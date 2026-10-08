@@ -44,6 +44,12 @@ static char *heap_listp;
 static char *free_listp;
 // static char *free_lastp;
 
+#define NUM_CLASSES 20                       // 서랍 개수. 짝수8바이트 정렬
+static char *seg_heads;                      // 서랍 머리 20칸이 시작하는 주소
+
+#define SEG_HEAD(cls)        TO_PTR(GET(seg_heads + (cls)*WSIZE))       // cls번 서랍의 첫 블록
+#define SET_SEG_HEAD(cls, p) PUT(seg_heads + (cls)*WSIZE, TO_OFF(p))   // cls번 서랍의 첫 블록을 p
+
 #define MAX(x,y) ((x) > (y) ? (x) : (y))
 
 #define PACK(size, alloc) ((size) | (alloc))
@@ -81,12 +87,18 @@ static void *find_fit(size_t asize);
 static void place(void *bp, size_t asize);
 static void insert_free(void *bp);
 static void remove_free(void *bp);
+static int get_size_class(size_t size);
 
 /*
  * mm_init - initialize the malloc package.
  */
 int mm_init(void)
 {
+    if ((seg_heads = mem_sbrk(NUM_CLASSES*WSIZE)) == (void *)-1)
+        return -1;
+    for (int i = 0; i < NUM_CLASSES; i++)
+        PUT(seg_heads + i*WSIZE, 0);         // 모든 서랍을 빈 상태로
+
     if((heap_listp = mem_sbrk(4*WSIZE)) == (void *)-1)
         return -1;
     PUT(heap_listp, 0);
@@ -99,6 +111,16 @@ int mm_init(void)
     if (extend_heap(2*DSIZE/WSIZE) == NULL)      // 16바이트 = 4워드
         return -1;
     return 0;
+}
+
+static int get_size_class(size_t size)
+{
+    int cls = 0;
+    while (cls < NUM_CLASSES - 1 && size > 16) {
+        size >>= 1;                     // 2로 나누기
+        cls++;
+    }
+    return cls;
 }
 
 static void *extend_heap(size_t words)
@@ -158,8 +180,10 @@ void *mm_malloc(size_t size)
 }
 
 static void *find_fit(size_t asize){
-    char *bp = free_listp;
-    char *best = NULL;
+
+    for (int cls = get_size_class(asize); cls < NUM_CLASSES; cls++) {   // 내 서랍부터 큰 서랍 쪽으로
+        char *bp = SEG_HEAD(cls);
+        char *best = NULL;
 
     while(bp){
         size_t size = GET_SIZE(HDRP(bp));
@@ -171,7 +195,11 @@ static void *find_fit(size_t asize){
         }       
         bp = GET_SUCC(bp);
     }
-    return best;
+
+    if (best)                       // 이 서랍에서 찾았으면 끝
+        return best;
+    }
+    return NULL;                        // 어느 서랍에도 없으면 힙 늘리기
 }
 
 void place(void *bp, size_t asize){
@@ -182,9 +210,9 @@ void place(void *bp, size_t asize){
     }
     else{       
         size_t resize = GET_SIZE(HDRP(bp)) - asize;     // 분할
+        remove_free(bp);
         PUT(HDRP(bp), PACK(asize, 1));
         PUT(FTRP(bp), PACK(asize, 1));
-        remove_free(bp);
 
         bp = NEXT_BLKP(bp);
         PUT(HDRP(bp), PACK(resize, 0));
@@ -195,36 +223,38 @@ void place(void *bp, size_t asize){
 
 static void insert_free(void *bp)
 {
-    if(!free_listp){            //초기 listp 설정
-        free_listp = bp;
-        SET_SUCC(free_listp, NULL);
-        SET_PRED(free_listp, NULL);
+    int cls = get_size_class(GET_SIZE(HDRP(bp)));
+
+    if(!SEG_HEAD(cls)){            //초기 listp 설정
+        SET_SEG_HEAD(cls, bp);
+        SET_SUCC(bp, NULL);
+        SET_PRED(bp, NULL);
     }else{                      //마지막 listp에 연결
-        SET_PRED(free_listp, bp);
-        SET_SUCC(bp, free_listp);
-        free_listp = bp;
-        SET_PRED(free_listp, NULL);
+        SET_PRED(SEG_HEAD(cls), bp);
+        SET_SUCC(bp, SEG_HEAD(cls));
+        SET_SEG_HEAD(cls, bp);
+        SET_PRED(bp, NULL);
     }
 }
 
 static void remove_free(void *bp)
 {
-    
-        if(bp == free_listp)  // 맨 앞 위치 list 삭제
-        {   
-            free_listp = GET_SUCC(free_listp);
-            if(free_listp){
-                SET_PRED(free_listp, NULL);
-            }
-        }
-        else if(GET_PRED(bp) && GET_SUCC(bp)){      // 앞 뒤로 연결된 list 삭제
-            SET_PRED(GET_SUCC(bp), GET_PRED(bp));
-            SET_SUCC(GET_PRED(bp), GET_SUCC(bp));
-        }
-        else if(GET_PRED(bp) && !GET_SUCC(bp)){     // 마지막 위치 list 삭제
-            SET_SUCC(GET_PRED(bp), NULL);
-            SET_PRED(bp, NULL);
-        }
+    int cls = get_size_class(GET_SIZE(HDRP(bp)));
+
+    if(bp == SEG_HEAD(cls))  // 맨 앞 위치 list 삭제
+    {   
+        SET_SEG_HEAD(cls, GET_SUCC(bp));
+        if (SEG_HEAD(cls))
+            SET_PRED(SEG_HEAD(cls), NULL);
+    }
+    else if(GET_PRED(bp) && GET_SUCC(bp)){      // 앞 뒤로 연결된 list 삭제
+        SET_PRED(GET_SUCC(bp), GET_PRED(bp));
+        SET_SUCC(GET_PRED(bp), GET_SUCC(bp));
+    }
+    else if(GET_PRED(bp) && !GET_SUCC(bp)){     // 마지막 위치 list 삭제
+        SET_SUCC(GET_PRED(bp), NULL);
+        SET_PRED(bp, NULL);
+    }
 
 
 }
